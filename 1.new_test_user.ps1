@@ -1,0 +1,1 @@
+ New-ADUser -Name "Ivan Petrov" -GivenName "Ivan" -Surname "Petrov" -SamAccountName "ipterov" -UserPrincipalName "ipetrov@learnitlessons.com" -EmailAddress "ipetrov@learnitlessons.com" -Path "CN=Users,DC=learnitlessons,DC=com" -AccountPassword (ConvertTo-SecureString "SOmepass1" -AsPlainText -Force) -Enabled $true -Server "lit-dc1.learnitlessons.com" 

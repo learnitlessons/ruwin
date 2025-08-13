@@ -436,6 +436,216 @@ try {
     Write-Host "❌ Критическая ошибка при настройке удалённого доступа: $($_.Exception.Message)" -ForegroundColor Red
 }
 
+# ДОПОЛНИТЕЛЬНЫЙ ЭТАП: СОЗДАНИЕ ГРУППЫ REMOTE-RDP-ACCESS
+Write-Host "`n🔐 ДОПОЛНИТЕЛЬНЫЙ ЭТАП: Создание группы Remote-RDP-Access..." -ForegroundColor Cyan
+Write-Host "Создаём специальную группу для RDP доступа и добавляем всех пользователей" -ForegroundColor Gray
+
+# Определяем параметры для создания группы
+$rdpGroupName = "remote-rdp-access"
+$rdpGroupPath = "OU=IT,OU=Lab-Groups,$domainDN"
+$rdpGroupDescription = "Группа для предоставления RDP доступа всем лабораторным пользователям"
+
+Write-Host "📋 Параметры группы:" -ForegroundColor Yellow
+Write-Host "   Имя группы: $rdpGroupName" -ForegroundColor White
+Write-Host "   Расположение: $rdpGroupPath" -ForegroundColor White
+Write-Host "   Описание: $rdpGroupDescription" -ForegroundColor White
+
+# Проверяем существование группы
+try {
+    $existingGroup = Get-ADGroup -Identity $rdpGroupName -ErrorAction Stop
+    Write-Host "⚠️ Группа $rdpGroupName уже существует: $($existingGroup.DistinguishedName)" -ForegroundColor Yellow
+    $rdpGroup = $existingGroup
+} catch {
+    # Создаём группу
+    try {
+        Write-Host "🔧 Создаём группу $rdpGroupName..." -ForegroundColor Cyan
+        
+        $groupParameters = @{
+            Name = $rdpGroupName
+            SamAccountName = $rdpGroupName
+            GroupCategory = "Security"
+            GroupScope = "Global"
+            DisplayName = "Remote RDP Access Group"
+            Description = $rdpGroupDescription
+            Path = $rdpGroupPath
+        }
+        
+        New-ADGroup @groupParameters
+        Write-Host "✅ Группа $rdpGroupName успешно создана в OU IT" -ForegroundColor Green
+        
+        # Получаем созданную группу для дальнейшей работы
+        $rdpGroup = Get-ADGroup -Identity $rdpGroupName
+        
+    } catch {
+        Write-Host "❌ ОШИБКА создания группы $rdpGroupName : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Проверьте права доступа и существование OU=IT,OU=Lab-Groups" -ForegroundColor Red
+        return
+    }
+}
+
+# Получаем всех созданных пользователей из лабораторной среды
+Write-Host "`n👥 Получаем список всех лабораторных пользователей..." -ForegroundColor Cyan
+
+try {
+    $allLabUsers = Get-ADUser -Filter * -SearchBase "OU=Lab-Groups,$domainDN" -Properties Department, Title
+    
+    if ($allLabUsers.Count -eq 0) {
+        Write-Host "❌ Лабораторные пользователи не найдены в OU=Lab-Groups" -ForegroundColor Red
+        Write-Host "Убедитесь, что скрипт создания пользователей выполнен успешно" -ForegroundColor Red
+        return
+    }
+    
+    Write-Host "✅ Найдено пользователей: $($allLabUsers.Count)" -ForegroundColor Green
+    
+    # Показываем статистику по департаментам
+    Write-Host "`n📊 Распределение пользователей по департаментам:" -ForegroundColor Yellow
+    $departmentStats = $allLabUsers | Group-Object Department | Sort-Object Name
+    foreach ($dept in $departmentStats) {
+        $deptName = if ($dept.Name) { $dept.Name } else { "Не указан" }
+        Write-Host "   $deptName : $($dept.Count) пользователей" -ForegroundColor Gray
+    }
+    
+} catch {
+    Write-Host "❌ Ошибка получения списка пользователей: $($_.Exception.Message)" -ForegroundColor Red
+    return
+}
+
+# Добавляем всех пользователей в группу remote-rdp-access
+Write-Host "`n🔧 Добавляем всех пользователей в группу $rdpGroupName..." -ForegroundColor Cyan
+
+$addedUsers = 0
+$existingMembers = 0
+$errorCount = 0
+
+# Получаем текущих членов группы для проверки
+try {
+    $currentMembers = Get-ADGroupMember -Identity $rdpGroupName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SamAccountName
+    if (-not $currentMembers) { $currentMembers = @() }
+} catch {
+    $currentMembers = @()
+}
+
+Write-Host "📋 Текущих членов в группе: $($currentMembers.Count)" -ForegroundColor Gray
+
+foreach ($user in $allLabUsers) {
+    $username = $user.SamAccountName
+    $userDisplayName = "$($user.GivenName) $($user.Surname)"
+    $userDepartment = if ($user.Department) { $user.Department } else { "Не указан" }
+    
+    Write-Host "👤 Обрабатываем: $userDisplayName ($username) - $userDepartment" -ForegroundColor White
+    
+    try {
+        # Проверяем, является ли пользователь уже членом группы
+        if ($currentMembers -contains $username) {
+            Write-Host "  ⚠️ Уже является членом группы" -ForegroundColor Yellow
+            $existingMembers++
+        } else {
+            # Добавляем пользователя в группу
+            Add-ADGroupMember -Identity $rdpGroupName -Members $username -ErrorAction Stop
+            Write-Host "  ✅ Успешно добавлен в группу" -ForegroundColor Green
+            $addedUsers++
+        }
+    } catch {
+        Write-Host "  ❌ Ошибка добавления: $($_.Exception.Message)" -ForegroundColor Red
+        $errorCount++
+    }
+}
+
+# Итоговая статистика
+Write-Host "`n📊 ИТОГОВАЯ СТАТИСТИКА ДОБАВЛЕНИЯ В ГРУППУ:" -ForegroundColor Cyan
+Write-Host "✅ Успешно добавлено: $addedUsers пользователей" -ForegroundColor Green
+Write-Host "⚠️ Уже было в группе: $existingMembers пользователей" -ForegroundColor Yellow
+Write-Host "❌ Ошибок при добавлении: $errorCount" -ForegroundColor Red
+Write-Host "📊 Всего обработано: $($allLabUsers.Count) пользователей" -ForegroundColor White
+
+# Проверяем финальное состояние группы
+Write-Host "`n🔍 Проверка финального состояния группы $rdpGroupName :" -ForegroundColor Cyan
+
+try {
+    $finalMembers = Get-ADGroupMember -Identity $rdpGroupName | Select-Object Name, SamAccountName, ObjectClass
+    
+    Write-Host "✅ Итого членов в группе: $($finalMembers.Count)" -ForegroundColor Green
+    
+    if ($finalMembers.Count -gt 0) {
+        Write-Host "`n📋 Члены группы $rdpGroupName :" -ForegroundColor Yellow
+        
+        # Группируем по департаментам для красивого отображения
+        $membersByDept = @{}
+        
+        foreach ($member in $finalMembers) {
+            try {
+                $memberDetails = Get-ADUser -Identity $member.SamAccountName -Properties Department, Title -ErrorAction SilentlyContinue
+                $dept = if ($memberDetails.Department) { $memberDetails.Department } else { "Не указан" }
+                
+                if (-not $membersByDept.ContainsKey($dept)) {
+                    $membersByDept[$dept] = @()
+                }
+                
+                $membersByDept[$dept] += @{
+                    Name = $member.Name
+                    SamAccountName = $member.SamAccountName
+                    Title = if ($memberDetails.Title) { $memberDetails.Title } else { "Не указана" }
+                }
+            } catch {
+                Write-Host "  ⚠️ Не удалось получить детали для $($member.SamAccountName)" -ForegroundColor Yellow
+            }
+        }
+        
+        # Выводим членов по департаментам
+        $sortedDepts = $membersByDept.Keys | Sort-Object
+        foreach ($dept in $sortedDepts) {
+            Write-Host "`n🏢 Департамент: $dept ($($membersByDept[$dept].Count) чел.)" -ForegroundColor Cyan
+            foreach ($member in ($membersByDept[$dept] | Sort-Object Name)) {
+                Write-Host "   👤 $($member.Name) ($($member.SamAccountName)) - $($member.Title)" -ForegroundColor Gray
+            }
+        }
+    }
+    
+} catch {
+    Write-Host "❌ Ошибка проверки членов группы: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+# Показываем информацию о созданной группе
+Write-Host "`n📋 ИНФОРМАЦИЯ О СОЗДАННОЙ ГРУППЕ:" -ForegroundColor Cyan
+try {
+    $groupInfo = Get-ADGroup -Identity $rdpGroupName -Properties Description, ManagedBy, GroupCategory, GroupScope, whenCreated
+    
+    Write-Host "Имя группы: $($groupInfo.Name)" -ForegroundColor White
+    Write-Host "SAM Account Name: $($groupInfo.SamAccountName)" -ForegroundColor White
+    Write-Host "Distinguished Name: $($groupInfo.DistinguishedName)" -ForegroundColor White
+    Write-Host "Категория: $($groupInfo.GroupCategory)" -ForegroundColor White
+    Write-Host "Область действия: $($groupInfo.GroupScope)" -ForegroundColor White
+    Write-Host "Описание: $($groupInfo.Description)" -ForegroundColor White
+    Write-Host "Дата создания: $($groupInfo.whenCreated)" -ForegroundColor White
+    Write-Host "Количество членов: $($finalMembers.Count)" -ForegroundColor White
+    
+} catch {
+    Write-Host "❌ Ошибка получения информации о группе: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+# Инструкции по использованию новой группы
+Write-Host "`n💡 ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ ГРУППЫ REMOTE-RDP-ACCESS:" -ForegroundColor Yellow
+Write-Host "1. Группа создана в OU=IT,OU=Lab-Groups для управления RDP доступом" -ForegroundColor White
+Write-Host "2. Все лабораторные пользователи добавлены в эту группу" -ForegroundColor White
+Write-Host "3. Используйте эту группу для:" -ForegroundColor White
+Write-Host "   • Назначения разрешений на RDP подключения" -ForegroundColor Gray
+Write-Host "   • Управления доступом к Terminal Services" -ForegroundColor Gray
+Write-Host "   • Настройки Group Policy для удалённого доступа" -ForegroundColor Gray
+Write-Host "   • Централизованного управления RDP правами" -ForegroundColor Gray
+Write-Host "4. Для добавления/удаления RDP доступа - управляйте членством в группе" -ForegroundColor White
+Write-Host "5. Группа является Global Security Group - может использоваться в любом домене леса" -ForegroundColor White
+
+Write-Host "`n🚀 ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ:" -ForegroundColor Yellow
+Write-Host "• Group Policy: Computer Configuration → Windows Settings → Security Settings → User Rights Assignment → 'Allow log on through Remote Desktop Services'" -ForegroundColor Gray
+Write-Host "• Назначить право группе: $($domain.DNSRoot)\$rdpGroupName" -ForegroundColor Gray
+Write-Host "• PowerShell: Add-ADGroupMember -Identity '$rdpGroupName' -Members 'НовыйПользователь'" -ForegroundColor Gray
+Write-Host "• PowerShell: Remove-ADGroupMember -Identity '$rdpGroupName' -Members 'УдаляемыйПользователь'" -ForegroundColor Gray
+
+Write-Host "`n✅ ДОПОЛНИТЕЛЬНЫЙ ЭТАП ЗАВЕРШЁН: Группа Remote-RDP-Access готова к использованию!" -ForegroundColor Green
+Write-Host "   Расположение: OU=IT,OU=Lab-Groups,$($domain.DNSRoot)" -ForegroundColor White
+Write-Host "   Членов в группе: $($finalMembers.Count)" -ForegroundColor White
+Write-Host "   Тип: Global Security Group" -ForegroundColor White
+
 # ФИНАЛЬНЫЙ ОТЧЁТ И ИНСТРУКЦИИ
 Write-Host "`n" + "=" * 80 -ForegroundColor Magenta
 Write-Host "🎉 ЛАБОРАТОРНАЯ СРЕДА ДЛЯ ИЗУЧЕНИЯ ГРУПП ПОЛНОСТЬЮ ГОТОВА!" -ForegroundColor Magenta
